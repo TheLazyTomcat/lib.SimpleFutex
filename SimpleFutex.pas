@@ -18,7 +18,7 @@
 
   Version 1.0 (2021-11-06)
 
-  Last change 2021-11-06
+  Last change 2021-11-07
 
   ©2021 František Milt
 
@@ -111,13 +111,13 @@ type
 {
   FutexWaitIntr
 
-  Waits on futex until the the thread is woken by FUTEX_WAKE, signal, spurious
+  Waits on futex until the thread is woken by FUTEX_WAKE, signal, spurious
   wakeup or the timeout period elapses.
 
-  If the paramer Value does not match content of the futex at the time of call,
-  the function returns immediately, returning fwrValue.
+  If the parameter Value does not match content of the futex at the time of 
+  call, the function returns immediately, returning fwrValue.
 
-  What cased the function to return is indicated by returned value.
+  What caused the function to return is indicated by returned value.
 }
 Function FutexWaitIntr(var Futex: TFutex; Value: TFutex; Timeout: UInt32 = INFINITE): TFutexWaitResult;
 
@@ -126,7 +126,7 @@ Function FutexWaitIntr(var Futex: TFutex; Value: TFutex; Timeout: UInt32 = INFIN
 
   Behaves the same as FutexWaitIntr, but it will never return fwrInterrupted.
   If the waiting is ended by a cause that falls into that category, the
-  function recalculates timeout in relation to already alapsed time and
+  function recalculates timeout in relation to already elapsed time and
   re-enters waiting.
 }
 Function FutexWait(var Futex: TFutex; Value: TFutex; Timeout: UInt32 = INFINITE): TFutexWaitResult;
@@ -152,6 +152,7 @@ Function FutexWake(var Futex: TFutex; Count: Integer): Integer;
   Returns number of woken waiters.
 }
 Function FutexRequeue(var Futex: TFutex; Count: Integer; var Futex2: TFutex): Integer;
+
 {
   FutexCmpRequeue
 
@@ -159,7 +160,7 @@ Function FutexRequeue(var Futex: TFutex; Count: Integer; var Futex2: TFutex): In
 
   Count gives maximum number of woken waiters.
 
-  When FutexRequeue returns any negative number, it indicates that value of
+  When FutexCmpRequeue returns any negative number, it indicates that value of
   Futex variable did not match Value parameter at the time of call.
   Otherwise it returns number of woken waiters.
 }
@@ -182,7 +183,7 @@ Function FutexCmpRequeue(var Futex: TFutex; Count: Integer; Value: TFutex; var F
 
     WARNING - Simple futex is not recursive. Calling SimpleFutexLock on a
               locked mutex in the same thread will block indefinitely, creating
-              deadlock.
+              a deadlock.
 
     WARNING - Simple futex is not robust. If a thread fails to unlock the SF,
               it will stay locked indefinitely (but note that it can be
@@ -207,9 +208,9 @@ procedure SimpleFutexUnlock(var Futex: TFutex);
 --------------------------------------------------------------------------------
 ===============================================================================}
 {
-  Only wery basic implementation of semaphore (counter synchronizer).
+  Only very basic implementation of semaphore (counter synchronizer).
 
-  If count is greater than zero, it is signaled (unlocked). If zero, is is
+  If count is greater than zero, it is signaled (unlocked). If zero, it is
   non-signaled (locked).
 
   SimpleSemaphoreWait decrements the count. If the count was zero or less
@@ -249,7 +250,7 @@ procedure SimpleSemaphorePost(var Futex: TFutex);
 
     Standalone instance is created by constructor that does not expect an
     external Futex variable. The futex is completely internal and is managet
-    automatically. To properly use it, rceate one instance and use this one
+    automatically. To properly use it, create one instance and use this one
     object in all synchronizing threads.
 
     Shared instace expects pre-existing futex variable to be passed to the
@@ -510,7 +511,7 @@ If OrigState <> SF_STATE_UNLOCKED then
     Wait in a loop until state of the futex becomes unlocked.
 
     Note that if we acquire lock here, the state of the futex will stay locked
-    with waiter, even when there might be none. This is not problem, it just
+    with waiter, even when there might be none. This is not a problem, it just
     means there will be pointless call to FutexWake when unlocking
   }
     while OrigState <> SF_STATE_UNLOCKED do
