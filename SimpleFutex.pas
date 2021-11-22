@@ -18,7 +18,7 @@
 
   Version 1.0 (2021-11-06)
 
-  Last change 2021-11-07
+  Last change 2021-11-22
 
   ©2021 František Milt
 
@@ -358,6 +358,7 @@ end;
 
 //------------------------------------------------------------------------------
 
+{$IFDEF OverflowChecks}{$Q-}{$ENDIF}
 Function FutexWait(var Futex: TFutex; Value: TFutex; Timeout: UInt32 = INFINITE): TFutexWaitResult;
 var
   StartTime:  Int64;
@@ -373,9 +374,7 @@ var
         ErrorNumber := errno;
         raise ESFTimeError.CreateFmt('FutexWait.GetTimeAsMilliseconds: Unable to obtain time (%d - %s).',[ErrorNumber,StrError(ErrorNumber)]);
       end
-  {$IFDEF OverflowChecks}{$Q-}{$ENDIF}
     else Result := (((Int64(TimeSpec.tv_sec) * 1000) + (Int64(TimeSpec.tv_nsec) div 1000000))) and (Int64(-1) shr 1);
-  {$IFDEF OverflowChecks}{$Q+}{$ENDIF}
   end;
 
 begin
@@ -389,19 +388,18 @@ while True do
         IntrTime := GetTimeAsMilliseconds;
         If IntrTime > StartTime then
           begin
-          {$IFDEF OverflowChecks}{$Q-}{$ENDIF}
             If Timeout <= (IntrTime - StartTime) then
               begin
                 Result := fwrTimeout;
                 Break{while};
               end
             else Timeout := Timeout - (IntrTime - StartTime)
-          {$IFDEF OverflowChecks}{$Q+}{$ENDIF}
           end;
       end
     else Break{while};
   end;
 end;
+{$IFDEF OverflowChecks}{$Q+}{$ENDIF}
 
 //------------------------------------------------------------------------------
 
