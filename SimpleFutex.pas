@@ -16,11 +16,11 @@
       NOTE - since proper implementation of futexes is not particularly easy,
              there are probably errors. If you find any, please let me know.
 
-  Version 1.0 (2021-11-06)
+  Version 1.0.1 (2022-02-22)
 
-  Last change 2021-11-22
+  Last change 2022-02-22
 
-  ©2021 František Milt
+  ©2021-2022 František Milt
 
   Contacts:
     František Milt: frantisek.milt@gmail.com
@@ -55,6 +55,8 @@ unit SimpleFutex;
 
 {$IFDEF FPC}
   {$MODE ObjFPC}
+  {$DEFINE FPC_DisableWarns}
+  {$MACRO ON}
 {$ENDIF}
 {$H+}
 
@@ -147,24 +149,28 @@ Function FutexWake(var Futex: TFutex; Count: Integer): Integer;
 
   For description of requeue operation, refer to futex documentation.
 
-  Count gives maximum number of woken waiters.
+  WakeCount is maximum number of woken waiters.
 
-  Returns number of woken waiters.
+  RequeueCount is maximum number of requeued waiters.
+
+  Returns sum of woken and requeued waiters.
 }
-Function FutexRequeue(var Futex: TFutex; Count: Integer; var Futex2: TFutex): Integer;
+Function FutexRequeue(var Futex: TFutex; var Futex2: TFutex; WakeCount,RequeueCount: Integer): Integer;
 
 {
   FutexCmpRequeue
 
   For description of compare-requeue operation, refer to futex documentation.
 
-  Count gives maximum number of woken waiters.
+  WakeCount gives maximum number of woken waiters.
+
+  RequeueCount is maximum number of requeued waiters.
 
   When FutexCmpRequeue returns any negative number, it indicates that value of
   Futex variable did not match Value parameter at the time of call.
-  Otherwise it returns number of woken waiters.
+  Otherwise it returns a sum of woken and requeued waiters.
 }
-Function FutexCmpRequeue(var Futex: TFutex; Count: Integer; Value: TFutex; var Futex2: TFutex): Integer;
+Function FutexCmpRequeue(var Futex: TFutex; Value: TFutex; var Futex2: TFutex; WakeCount,RequeueCount: Integer): Integer;
 
 {===============================================================================
 --------------------------------------------------------------------------------
@@ -201,6 +207,14 @@ procedure SimpleFutexInit(out Futex: TFutex);
 
 procedure SimpleFutexLock(var Futex: TFutex);
 procedure SimpleFutexUnlock(var Futex: TFutex);
+
+{
+  SimpleFutexQueue only sets the futex to a state indicating there are threds
+  waiting on it.
+  It is intended for situations where you use Futex(Cmp)Requeue function to
+  queue threads to wait on the Futex.
+}
+procedure SimpleFutexQueue(var Futex: TFutex);
 
 {===============================================================================
 --------------------------------------------------------------------------------
@@ -318,6 +332,11 @@ uses
   BaseUnix, Linux, Errors,
   InterlockedOps;
 
+{$IFDEF FPC_DisableWarns}
+  {$DEFINE FPCDWM}
+  {$DEFINE W4055:={$WARN 4055 OFF}} // Conversion between ordinals and pointers is not portable
+{$ENDIF}
+
 {===============================================================================
 --------------------------------------------------------------------------------
                                  Futex wrappers
@@ -420,14 +439,13 @@ end;
 
 //------------------------------------------------------------------------------
 
-Function FutexRequeue(var Futex: TFutex; Count: Integer; var Futex2: TFutex): Integer;
+Function FutexRequeue(var Futex: TFutex; var Futex2: TFutex; WakeCount,RequeueCount: Integer): Integer;
 var
   ErrorNumber:  cInt;
 begin
-If Count < 0 then
-  Result := Integer(Linux.Futex(@Futex,FUTEX_REQUEUE,cInt(MAXINT),nil,@Futex2,0))
-else
-  Result := Integer(Linux.Futex(@Futex,FUTEX_REQUEUE,cInt(Count),nil,@Futex2,0));
+{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
+Result := Integer(Linux.Futex(@Futex,FUTEX_REQUEUE,cInt(WakeCount),Pointer(PtrInt(RequeueCount)),@Futex2,0));
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 If Result = -1 then
   begin
     ErrorNumber := errno;
@@ -437,14 +455,13 @@ end;
 
 //------------------------------------------------------------------------------
 
-Function FutexCmpRequeue(var Futex: TFutex; Count: Integer; Value: TFutex; var Futex2: TFutex): Integer;
+Function FutexCmpRequeue(var Futex: TFutex; Value: TFutex; var Futex2: TFutex; WakeCount,RequeueCount: Integer): Integer;
 var
   ErrorNumber:  cInt;
 begin
-If Count < 0 then
-  Result := Integer(Linux.Futex(@Futex,FUTEX_CMP_REQUEUE,cInt(MAXINT),nil,@Futex2,Value))
-else
-  Result := Integer(Linux.Futex(@Futex,FUTEX_CMP_REQUEUE,cInt(Count),nil,@Futex2,Value));
+{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
+Result := Integer(Linux.Futex(@Futex,FUTEX_CMP_REQUEUE,cInt(WakeCount),Pointer(PtrInt(RequeueCount)),@Futex2,Value));
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 If Result = -1 then
   begin
     ErrorNumber := errno;
@@ -544,6 +561,13 @@ If InterlockedDecrement(Futex) <> SF_STATE_UNLOCKED then
   }
     FutexWake(Futex,1);
   end;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure SimpleFutexQueue(var Futex: TFutex);
+begin
+InterlockedStore(Futex,SF_STATE_WAITERS);
 end;
 
 {===============================================================================
