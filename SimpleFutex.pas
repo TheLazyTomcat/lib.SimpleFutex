@@ -16,9 +16,9 @@
       NOTE - since proper implementation of futexes is not particularly easy,
              there are probably errors. If you find any, please let me know.
 
-  Version 1.0.1 (2022-02-22)
+  Version 1.0.2 (2022-02-26)
 
-  Last change 2022-02-22
+  Last change 2022-02-26
 
   ©2021-2022 František Milt
 
@@ -209,10 +209,10 @@ procedure SimpleFutexLock(var Futex: TFutex);
 procedure SimpleFutexUnlock(var Futex: TFutex);
 
 {
-  SimpleFutexQueue only sets the futex to a state indicating there are threds
+  SimpleFutexQueue only sets the futex to a state indicating there are threads
   waiting on it.
-  It is intended for situations where you use Futex(Cmp)Requeue function to
-  queue threads to wait on the Futex.
+  It is intended for a situation where you use Futex(Cmp)Requeue function to
+  queue threads to wait on the Futex variable.
 }
 procedure SimpleFutexQueue(var Futex: TFutex);
 
@@ -397,9 +397,9 @@ var
   end;
 
 begin
-StartTime := GetTimeAsMilliseconds;
 while True do
   begin
+    StartTime := GetTimeAsMilliseconds;
     Result := FutexWaitIntr(Futex,Value,Timeout);
     If Result = fwrInterrupted then
       begin
