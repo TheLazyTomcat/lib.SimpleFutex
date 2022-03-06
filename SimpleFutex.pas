@@ -16,9 +16,9 @@
       NOTE - since proper implementation of futexes is not particularly easy,
              there are probably errors. If you find any, please let me know.
 
-  Version 1.0.2 (2022-02-26)
+  Version 1.0.3 (2022-03-06)
 
-  Last change 2022-02-26
+  Last change 2022-03-06
 
   ©2021-2022 František Milt
 
@@ -102,8 +102,7 @@ type
 
     fwrTimeout     - waiting timed out
 
-    fwrInterrupted - waiting was interrupted by a signal or by a spurious
-                     wakeup
+    fwrInterrupted - waiting was interrupted (eg. by a signal)
 }
   TFutexWaitResult = (fwrWoken,fwrValue,fwrTimeout,fwrInterrupted);
 
@@ -149,9 +148,11 @@ Function FutexWake(var Futex: TFutex; Count: Integer): Integer;
 
   For description of requeue operation, refer to futex documentation.
 
-  WakeCount is maximum number of woken waiters.
+  WakeCount is maximum number of woken waiters (any negative value is
+  translated to MAXINT).
 
-  RequeueCount is maximum number of requeued waiters.
+  RequeueCount is maximum number of requeued waiters (any negative value is
+  translated to MAXINT).
 
   Returns sum of woken and requeued waiters.
 }
@@ -162,9 +163,11 @@ Function FutexRequeue(var Futex: TFutex; var Futex2: TFutex; WakeCount,RequeueCo
 
   For description of compare-requeue operation, refer to futex documentation.
 
-  WakeCount gives maximum number of woken waiters.
+  WakeCount gives maximum number of woken waiters (any negative value is
+  translated to MAXINT).
 
-  RequeueCount is maximum number of requeued waiters.
+  RequeueCount is maximum number of requeued waiters (any negative value is
+  translated to MAXINT).
 
   When FutexCmpRequeue returns any negative number, it indicates that value of
   Futex variable did not match Value parameter at the time of call.
@@ -207,14 +210,6 @@ procedure SimpleFutexInit(out Futex: TFutex);
 
 procedure SimpleFutexLock(var Futex: TFutex);
 procedure SimpleFutexUnlock(var Futex: TFutex);
-
-{
-  SimpleFutexQueue only sets the futex to a state indicating there are threads
-  waiting on it.
-  It is intended for a situation where you use Futex(Cmp)Requeue function to
-  queue threads to wait on the Futex variable.
-}
-procedure SimpleFutexQueue(var Futex: TFutex);
 
 {===============================================================================
 --------------------------------------------------------------------------------
@@ -380,8 +375,9 @@ end;
 {$IFDEF OverflowChecks}{$Q-}{$ENDIF}
 Function FutexWait(var Futex: TFutex; Value: TFutex; Timeout: UInt32 = INFINITE): TFutexWaitResult;
 var
-  StartTime:  Int64;
-  IntrTime:   Int64;
+  TimeoutRemaining: UInt32;
+  StartTime:        Int64;
+  CurrentTime:      Int64;
 
   Function GetTimeAsMilliseconds: Int64;
   var
@@ -397,22 +393,23 @@ var
   end;
 
 begin
+TimeoutRemaining := Timeout;
+StartTime := GetTimeAsMilliseconds;
 while True do
   begin
-    StartTime := GetTimeAsMilliseconds;
-    Result := FutexWaitIntr(Futex,Value,Timeout);
+    Result := FutexWaitIntr(Futex,Value,TimeoutRemaining);
     If Result = fwrInterrupted then
       begin
         // recalculate timeout, ignore time spent in here
-        IntrTime := GetTimeAsMilliseconds;
-        If IntrTime > StartTime then
+        CurrentTime := GetTimeAsMilliseconds;
+        If CurrentTime >= StartTime then
           begin
-            If Timeout <= (IntrTime - StartTime) then
+            If Timeout <= UInt32(CurrentTime - StartTime) then
               begin
                 Result := fwrTimeout;
                 Break{while};
               end
-            else Timeout := Timeout - (IntrTime - StartTime)
+            else TimeoutRemaining := Timeout - UInt32(CurrentTime - StartTime)
           end;
       end
     else Break{while};
@@ -427,9 +424,8 @@ var
   ErrorNumber:  cInt;
 begin
 If Count < 0 then
-  Result := Integer(Linux.Futex(@Futex,FUTEX_WAKE,cInt(MAXINT),nil))
-else
-  Result := Integer(Linux.Futex(@Futex,FUTEX_WAKE,cInt(Count),nil));
+  Count := MAXINT;
+Result := Integer(Linux.Futex(@Futex,FUTEX_WAKE,cInt(Count),nil));
 If Result = -1 then
   begin
     ErrorNumber := errno;
@@ -443,6 +439,10 @@ Function FutexRequeue(var Futex: TFutex; var Futex2: TFutex; WakeCount,RequeueCo
 var
   ErrorNumber:  cInt;
 begin
+If WakeCount < 0 then
+  WakeCount := MAXINT;
+If RequeueCount < 0 then
+  RequeueCount := MAXINT;
 {$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
 Result := Integer(Linux.Futex(@Futex,FUTEX_REQUEUE,cInt(WakeCount),Pointer(PtrInt(RequeueCount)),@Futex2,0));
 {$IFDEF FPCDWM}{$POP}{$ENDIF}
@@ -459,6 +459,10 @@ Function FutexCmpRequeue(var Futex: TFutex; Value: TFutex; var Futex2: TFutex; W
 var
   ErrorNumber:  cInt;
 begin
+If WakeCount < 0 then
+  WakeCount := MAXINT;
+If RequeueCount < 0 then
+  RequeueCount := MAXINT;
 {$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
 Result := Integer(Linux.Futex(@Futex,FUTEX_CMP_REQUEUE,cInt(WakeCount),Pointer(PtrInt(RequeueCount)),@Futex2,Value));
 {$IFDEF FPCDWM}{$POP}{$ENDIF}
@@ -515,8 +519,9 @@ OrigState := InterlockedCompareExchange(Futex,SF_STATE_LOCKED,SF_STATE_UNLOCKED)
 }
 If OrigState <> SF_STATE_UNLOCKED then
   begin
-    // futex was locked or locked with waiters...
   {
+    Futex was locked or locked with waiters...
+
     Check if there were waiters (OrigValue would be less than 0). If not, set
     state to locked with waiters because we will enter waiting.
   }
@@ -526,8 +531,7 @@ If OrigState <> SF_STATE_UNLOCKED then
     Wait in a loop until state of the futex becomes unlocked.
 
     Note that if we acquire lock here, the state of the futex will stay locked
-    with waiter, even when there might be none. This is not a problem, it just
-    means there will be pointless call to FutexWake when unlocking
+    with waiter, even when there might be none - this is not a problem.
   }
     while OrigState <> SF_STATE_UNLOCKED do
       begin
@@ -547,20 +551,16 @@ begin
 
   If it is other than unlocked, it means there were waiters (if we discount
   the possibility that it was already unlocked, which is an erroneous state at
-  this point, but in that case no harm will be done, just a pointless call to
-  FutexWake), so set it to unlocked and wake waiters.
-
-  If it is in an unlocked state, then there is no waiter and we can just return.
+  this point, but in that case no harm will be done). In any case set it to
+  unlocked.
 }
 If InterlockedDecrement(Futex) <> SF_STATE_UNLOCKED then
-  begin
-    InterlockedStore(Futex,SF_STATE_UNLOCKED);
-  {
-    Wake only one waiter, waking all is pointless because only one thread will
-    be able to acquire the lock and others would just re-enter waiting.
-  }
-    FutexWake(Futex,1);
-  end;
+  InterlockedStore(Futex,SF_STATE_UNLOCKED);
+{
+  Wake only one waiter, waking all is pointless because only one thread will
+  be able to acquire the lock and others would just re-enter waiting.
+}
+FutexWake(Futex,1);
 end;
 
 //------------------------------------------------------------------------------
