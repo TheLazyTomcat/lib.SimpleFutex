@@ -91,6 +91,8 @@ type
 const
   INFINITE = UInt32(-1);  // infinite timeout
 
+  FUTEX_BITSET_MATCH_ANY = UInt32($FFFFFFFF); // the name says it all :P
+
 type
   TFutexWord = cInt;
   PFutexWord = ^TFutexWord;
@@ -132,6 +134,10 @@ type
     CLOCK_MONOTONIC. Supported only from Linux 4.5 up.
 
     What caused the function to return is indicated by returned value.
+
+      WARNING - even when the function returns fwrWoken, it does not
+                necessarily mean the waiter was explicitly woken, it might very
+                well be a spurious wakeup.
 }
 Function FutexWait(var Futex: TFutexWord; Value: TFutexWord; Timeout: UInt32 = INFINITE; Private: Boolean = False; Realtime: Boolean = False): TFutexWaitResult;
 
@@ -153,7 +159,7 @@ Function FutexWaitNoInt(var Futex: TFutexWord; Value: TFutexWord; Timeout: UInt3
 {
   FutexWake
 
-  Wakes at most Count threads waiting on the given futex.
+  Wakes at least one and at most Count threads waiting on the given futex.
 
     If passed Count is negative, it will try to wake MAXINT (2147483647)
     threads.
@@ -199,7 +205,7 @@ Function FutexFD(var Futex: TFutexWord; Value: Integer; Private: Boolean = False
     Private indicates whether the futex is used only withing the current
     process.
 
-    Returns sum of woken and requeued waiters.
+    Returns number of woken waiters.
 }
 Function FutexRequeue(var Futex: TFutexWord; var Futex2: TFutexWord; WakeCount,RequeueCount: Integer; Private: Boolean = False): Integer;
 
@@ -226,6 +232,14 @@ Function FutexRequeue(var Futex: TFutexWord; var Futex2: TFutexWord; WakeCount,R
     Otherwise it returns a sum of woken and requeued waiters.
 }
 Function FutexCmpRequeue(var Futex: TFutexWord; Value: TFutexWord; var Futex2: TFutexWord; WakeCount,RequeueCount: Integer; Private: Boolean = False): Integer;
+
+
+Function FutexWaitBitSet(var Futex: TFutexWord; Value: TFutexWord; BitMask: UInt32 = FUTEX_BITSET_MATCH_ANY; Timeout: UInt32 = INFINITE; Private: Boolean = False; Realtime: Boolean = False): TFutexWaitResult;
+
+Function FutexWaitBitSetNoInt(var Futex: TFutexWord; Value: TFutexWord; BitMask: UInt32 = FUTEX_BITSET_MATCH_ANY; Timeout: UInt32 = INFINITE; Private: Boolean = False; Realtime: Boolean = False): TFutexWaitResult;
+
+Function FutexWakeBitSet(var Futex: TFutexWord; Count: Integer; BitMask: UInt32 = FUTEX_BITSET_MATCH_ANY; Private: Boolean = False): Integer;
+
 
 {===============================================================================
 --------------------------------------------------------------------------------
@@ -385,6 +399,14 @@ uses
 {$ENDIF}
 
 {===============================================================================
+    Internals
+===============================================================================}
+const
+  MSECS_PER_SEC = 1000;
+  NSECS_PER_SEC = 1000000000;
+  NSECS_PER_MSEC = 1000000;
+
+{===============================================================================
     Futex system constants
 ===============================================================================}
 const
@@ -397,8 +419,8 @@ const
 //FUTEX_LOCK_PI         = 6;
 //FUTEX_UNLOCK_PI       = 7;
 //FUTEX_TRYLOCK_PI      = 8;
-//FUTEX_WAIT_BITSET     = 9;
-//FUTEX_WAKE_BITSET     = 10;
+  FUTEX_WAIT_BITSET     = 9;
+  FUTEX_WAKE_BITSET     = 10;
 //FUTEX_WAIT_REQUEUE_PI = 11;
 //FUTEX_CMP_REQUEUE_PI  = 12;
 //FUTEX_LOCK_PI2	      = 13; // since Linux 5.14
@@ -407,8 +429,6 @@ const
   FUTEX_CLOCK_REALTIME = 256;
 
 //FUTEX_CMD_MASK = not cInt(FUTEX_PRIVATE_FLAG or FUTEX_CLOCK_REALTIME);
-
-//FUTEX_BITSET_MATCH_ANY = $FFFFFFFF;
 
 {===============================================================================
 --------------------------------------------------------------------------------
@@ -450,6 +470,48 @@ else
 {$IFDEF FPCDWM}{$POP}{$ENDIF}
 end;
 
+//------------------------------------------------------------------------------
+
+procedure GetTime(out Time: TTimeSpec; Realtime: Boolean);
+var
+  CallRes:      cInt;
+  ErrorNumber:  cInt;
+begin
+If Realtime then
+  CallRes := clock_gettime(CLOCK_REALTIME,@Time)
+else
+  CallRes := clock_gettime(CLOCK_MONOTONIC,@Time);
+If CallRes <> 0 then
+  begin
+    ErrorNumber := errno;
+    raise ESFTimeError.CreateFmt('FutexWait.GetTime: Unable to obtain time (%d - %s).',
+      [ErrorNumber,StrError(ErrorNumber)]);
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+{$IFDEF OverflowChecks}{$Q-}{$ENDIF}
+Function GetElapsedMillis(From: TTimeSpec; Realtime: Boolean): UInt32;
+var
+  CurrentTime:  TTimeSpec;
+  Temp:         Int64;
+begin
+GetTime(CurrentTime,Realtime);
+If CurrentTime.tv_sec >= From.tv_sec then // sanity check
+  begin
+    Temp := (((Int64(CurrentTime.tv_sec) - From.tv_sec) * MSECS_PER_SEC)  +
+             ((Int64(CurrentTime.tv_nsec) - From.tv_nsec) div NSECS_PER_MSEC)) and
+            (Int64(-1) shr 1);
+    If Temp < INFINITE then
+      Result := UInt32(Temp)
+    else
+      Result := INFINITE;
+  end
+else Result := 0;
+end;
+{$IFDEF OverflowChecks}{$Q+}{$ENDIF}
+
 {===============================================================================
     Futex wrappers - implementation
 ===============================================================================}
@@ -462,8 +524,8 @@ var
 begin
 If Timeout <> INFINITE then
   begin
-    TimeoutSpec.tv_sec := Timeout div 1000;
-    TimeoutSpec.tv_nsec := (Timeout mod 1000) * 1000000;
+    TimeoutSpec.tv_sec := Timeout div MSECS_PER_SEC;
+    TimeoutSpec.tv_nsec := (Timeout mod MSECS_PER_SEC) * NSECS_PER_MSEC;
     ResVal := Linux.Futex(@Futex,FutexOp(FUTEX_WAIT,Private,Realtime),Value,@TimeoutSpec);
   end
 else ResVal := Linux.Futex(@Futex,FutexOp(FUTEX_WAIT,Private,Realtime),Value,nil);
@@ -486,52 +548,13 @@ end;
 
 //------------------------------------------------------------------------------
 
-{$IFDEF OverflowChecks}{$Q-}{$ENDIF}
 Function FutexWaitNoInt(var Futex: TFutexWord; Value: TFutexWord; Timeout: UInt32 = INFINITE; Private: Boolean = False; Realtime: Boolean = False): TFutexWaitResult;
-
-  procedure GetTime(out Time: TTimeSpec);
-  var
-    CallRes:      cInt;
-    ErrorNumber:  cInt;
-  begin
-    If Realtime then
-      CallRes := clock_gettime(CLOCK_REALTIME,@Time)
-    else
-      CallRes := clock_gettime(CLOCK_MONOTONIC,@Time);
-    If CallRes <> 0 then
-      begin
-        ErrorNumber := errno;
-        raise ESFTimeError.CreateFmt('FutexWait.GetTime: Unable to obtain time (%d - %s).',
-          [ErrorNumber,StrError(ErrorNumber)]);
-      end;
-  end;
-
-  Function GetElapsedMillis(From: TTimeSpec): UInt32;
-  var
-    CurrentTime:  TTimeSpec;
-    Temp:         Int64;
-  begin
-    GetTime(CurrentTime);
-    Temp := 0;
-    If CurrentTime.tv_sec >= From.tv_sec then // sanity check
-      begin
-        Temp := (((Int64(CurrentTime.tv_sec) - From.tv_sec) * 1000)  +
-                 ((Int64(CurrentTime.tv_nsec) - From.tv_nsec) div 1000000)) and
-                (Int64(-1) shr 1);
-        If Temp < INFINITE then
-          Result := UInt32(Temp)
-        else
-          Result := INFINITE;
-      end
-    else Result := 0;
-  end;
-
 var
   StartTime:        TTimeSpec;
   TimeoutRemaining: UInt32;
   ElapsedMillis:    UInt32;
 begin
-GetTime(StartTime);
+GetTime(StartTime,Realtime);
 TimeoutRemaining := Timeout;
 while True do
   begin
@@ -542,7 +565,7 @@ while True do
         If Timeout <> INFINITE then
           begin
             // recalculate timeout, ignore time spent in recalculation
-            ElapsedMillis := GetElapsedMillis(StartTime);
+            ElapsedMillis := GetElapsedMillis(StartTime,Realtime);
             If ElapsedMillis > 0 then
               begin
                 If Timeout <= ElapsedMillis then
@@ -557,7 +580,6 @@ while True do
     else Break{while};
   end;
 end;
-{$IFDEF OverflowChecks}{$Q+}{$ENDIF}
 
 //------------------------------------------------------------------------------
 
@@ -619,6 +641,92 @@ If Result = -1 then
     else
       raise ESFFutexError.CreateFmt('FutexCmpRequeue: Requeue failed (%d - %s).',
         [ErrorNumber,StrError(ErrorNumber)]);
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+Function FutexWaitBitSet(var Futex: TFutexWord; Value: TFutexWord; BitMask: UInt32 = FUTEX_BITSET_MATCH_ANY; Timeout: UInt32 = INFINITE; Private: Boolean = False; Realtime: Boolean = False): TFutexWaitResult;
+var
+  ResVal:       cInt;
+  TimeoutSpec:  TTimeSpec;
+  ErrorNumber:  cInt;
+begin
+If Timeout <> INFINITE then
+  begin
+    // timeout for FUTEX_WAIT_BITSET is absolute
+    GetTime(TimeoutSpec,Realtime);
+    TimeoutSpec.tv_sec := TimeoutSpec.tv_sec + time_t(Timeout div MSECS_PER_SEC);
+    TimeoutSpec.tv_nsec := TimeoutSpec.tv_nsec + clong((Timeout mod MSECS_PER_SEC) * NSECS_PER_MSEC);
+    If TimeoutSpec.tv_nsec > NSECS_PER_SEC then
+      begin
+        TimeoutSpec.tv_nsec := TimeoutSpec.tv_nsec - NSECS_PER_SEC;
+        Inc(TimeoutSpec.tv_sec);
+      end;
+    ResVal := Linux.Futex(@Futex,FutexOp(FUTEX_WAIT_BITSET,Private,Realtime),Value,@TimeoutSpec,nil,cInt(BitMask));
+  end
+else ResVal := Linux.Futex(@Futex,FutexOp(FUTEX_WAIT_BITSET,Private,Realtime),Value,nil,nil,cInt(BitMask));
+If ResVal = -1 then
+  begin
+    ErrorNumber := errno;
+    case ErrorNumber of
+      ESysEWOULDBLOCK:  Result := fwrValue;
+      ESysETIMEDOUT:    Result := fwrTimeout;
+      ESysEINTR:        Result := fwrInterrupted;
+    else
+      // some other error
+      raise ESFFutexError.CreateFmt('FutexWaitBitSet: Wait failed (%d - %s).',
+        [ErrorNumber,StrError(ErrorNumber)]);
+    end;
+  end
+else Result := fwrWoken;
+end;
+
+//------------------------------------------------------------------------------
+
+Function FutexWaitBitSetNoInt(var Futex: TFutexWord; Value: TFutexWord; BitMask: UInt32 = FUTEX_BITSET_MATCH_ANY; Timeout: UInt32 = INFINITE; Private: Boolean = False; Realtime: Boolean = False): TFutexWaitResult;
+var
+  StartTime:        TTimeSpec;
+  TimeoutRemaining: UInt32;
+  ElapsedMillis:    UInt32;
+begin
+GetTime(StartTime,Realtime);
+TimeoutRemaining := Timeout;
+while True do
+  begin
+    Result := FutexWaitBitSet(Futex,Value,BitMask,TimeoutRemaining,Private,Realtime);
+    If Result = fwrInterrupted then
+      begin
+        If Timeout <> INFINITE then
+          begin
+            ElapsedMillis := GetElapsedMillis(StartTime,Realtime);
+            If ElapsedMillis > 0 then
+              begin
+                If Timeout <= ElapsedMillis then
+                  begin
+                    Result := fwrTimeout;
+                    Break{while};
+                  end
+                else TimeoutRemaining := Timeout - ElapsedMillis;
+              end;
+          end;
+      end
+    else Break{while};
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+Function FutexWakeBitSet(var Futex: TFutexWord; Count: Integer; BitMask: UInt32 = FUTEX_BITSET_MATCH_ANY; Private: Boolean = False): Integer;
+var
+  ErrorNumber:  cInt;
+begin
+Result := Integer(Linux.Futex(@Futex,FutexOp(FUTEX_WAKE_BITSET,Private),RectCount(Count),nil,nil,cInt(BitMask)));
+If Result = -1 then
+  begin
+    ErrorNumber := errno;
+    raise ESFFutexError.CreateFmt('FutexWakeBitSet: Waking failed (%d - %s).',
+      [ErrorNumber,StrError(ErrorNumber)]);
   end;
 end;
 
