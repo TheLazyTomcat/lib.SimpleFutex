@@ -11,7 +11,7 @@
 
     Main aim of this library is to provide wrappers for futexes (synchronization
     primitives in linux) and some very simple complete synchronization objects
-    based on them - currently simple futex/mutex and semaphore are implemented.
+    based on them - currently simple mutex and semaphore are implemented.
 
       NOTE - since proper implementation of futexes is not particularly easy,
              there are probably errors. If you find any, please let me know.
@@ -85,13 +85,20 @@ type
                                  Futex wrappers
 --------------------------------------------------------------------------------
 ===============================================================================}
+{===============================================================================
+    Futex wrappers - constants and types
+===============================================================================}
 const
-  INFINITE = UInt32(-1);
+  INFINITE = UInt32(-1);  // infinite timeout
 
 type
-  TFutex = cInt;
+  TFutexWord = cInt;
+  PFutexWord = ^TFutexWord;
+
+  TFutex = TFutexWord;
   PFutex = ^TFutex;
 
+//------------------------------------------------------------------------------
 {
   Values returned from waiting on futex.
 
@@ -110,70 +117,115 @@ type
     Futex wrappers - declaration
 ===============================================================================}
 {
-  FutexWaitIntr
+  FutexWait
 
   Waits on futex until the thread is woken by FUTEX_WAKE, signal, spurious
   wakeup or the timeout period elapses.
 
-  If the parameter Value does not match content of the futex at the time of 
-  call, the function returns immediately, returning fwrValue.
+    If the parameter Value does not match content of the futex at the time of
+    call, the function returns immediately, returning fwrValue.
 
-  What caused the function to return is indicated by returned value.
+    Setting Private to true indicates that the futex is used only withing
+    current process and allows system to do some optimizations.
+
+    When Realtime is true, the timing will use CLOCK_REALTIME clock instead of
+    CLOCK_MONOTONIC. Supported only from Linux 4.5 up.
+
+    What caused the function to return is indicated by returned value.
 }
-Function FutexWaitIntr(var Futex: TFutex; Value: TFutex; Timeout: UInt32 = INFINITE): TFutexWaitResult;
+Function FutexWait(var Futex: TFutexWord; Value: TFutexWord; Timeout: UInt32 = INFINITE; Private: Boolean = False; Realtime: Boolean = False): TFutexWaitResult;
 
 {
-  FutexWait
+  FutexWaitNoInt
 
   Behaves the same as FutexWaitIntr, but it will never return fwrInterrupted.
   If the waiting is ended by a cause that falls into that category, the
   function recalculates timeout in relation to already elapsed time and
   re-enters waiting.
+
+    WARNING - do not use if the waiting can be requeued to a different futex.
+              If the waiting is requeued and then is interrupted, this call
+              will re-enter waiting on the original futex, not on the one
+              to which it was requeued.
 }
-Function FutexWait(var Futex: TFutex; Value: TFutex; Timeout: UInt32 = INFINITE): TFutexWaitResult;
+Function FutexWaitNoInt(var Futex: TFutexWord; Value: TFutexWord; Timeout: UInt32 = INFINITE; Private: Boolean = False; Realtime: Boolean = False): TFutexWaitResult;
 
 {
   FutexWake
 
-  Simple wrapper that wakes at most Count threads waiting on the given futex.
+  Wakes at most Count threads waiting on the given futex.
 
-  If passed Count is negative, it will try to wake MAXINT (2147483647) threads.
+    If passed Count is negative, it will try to wake MAXINT (2147483647)
+    threads.
 
-  Returs number of woken waiters.
+    Private indicates whether the futex is used only withing the current
+    process.
+
+    Returs number of woken waiters.
 }
-Function FutexWake(var Futex: TFutex; Count: Integer): Integer;
+Function FutexWake(var Futex: TFutexWord; Count: Integer; Private: Boolean = False): Integer;
+
+{
+  FutexFD
+
+  Creates a file descriptor that is associated with the futex.
+
+    Value is used for asynchronous notification via signals (value stored here,
+    when non-zero, denotes the signal number), for details refer to futex
+    documentation.
+
+    Private indicates whether the futex is used only withing the current
+    process.
+
+    Returs created file descriptor.
+
+    WARNING - support for this call was removed in linux 2.6.26.
+}
+Function FutexFD(var Futex: TFutexWord; Value: Integer; Private: Boolean = False): Integer;
 
 {
   FutexRequeue
 
-  For description of requeue operation, refer to futex documentation.
+  Requeues waiting from one futex (Futex) to another (Futex2).
+  Please refer to futex documentation for detailed description of requeue
+  operation.
 
-  WakeCount is maximum number of woken waiters (any negative value is
-  translated to MAXINT).
+    WakeCount is maximum number of woken waiters (any negative value is
+    translated to MAXINT).
 
-  RequeueCount is maximum number of requeued waiters (any negative value is
-  translated to MAXINT).
+    RequeueCount is maximum number of requeued waiters (any negative value is
+    translated to MAXINT).
 
-  Returns sum of woken and requeued waiters.
+    Private indicates whether the futex is used only withing the current
+    process.
+
+    Returns sum of woken and requeued waiters.
 }
-Function FutexRequeue(var Futex: TFutex; var Futex2: TFutex; WakeCount,RequeueCount: Integer): Integer;
+Function FutexRequeue(var Futex: TFutexWord; var Futex2: TFutexWord; WakeCount,RequeueCount: Integer; Private: Boolean = False): Integer;
 
 {
   FutexCmpRequeue
 
-  For description of compare-requeue operation, refer to futex documentation.
+  Works the same as FutexRequeue, but it first checks whether Futex contains
+  value passed in parameter Value. If not, then the function will immediately
+  exit, returning a negative value.
+  For detailed description of compare-requeue operation, refer to futex
+  documentation.
 
-  WakeCount gives maximum number of woken waiters (any negative value is
-  translated to MAXINT).
+    WakeCount gives maximum number of woken waiters (any negative value is
+    translated to MAXINT).
 
-  RequeueCount is maximum number of requeued waiters (any negative value is
-  translated to MAXINT).
+    RequeueCount is maximum number of requeued waiters (any negative value is
+    translated to MAXINT).
 
-  When FutexCmpRequeue returns any negative number, it indicates that value of
-  Futex variable did not match Value parameter at the time of call.
-  Otherwise it returns a sum of woken and requeued waiters.
+    Private indicates whether the futex is used only withing the current
+    process.
+
+    When FutexCmpRequeue returns any negative number, it indicates that value
+    of Futex variable did not match Value parameter at the time of call.
+    Otherwise it returns a sum of woken and requeued waiters.
 }
-Function FutexCmpRequeue(var Futex: TFutex; Value: TFutex; var Futex2: TFutex; WakeCount,RequeueCount: Integer): Integer;
+Function FutexCmpRequeue(var Futex: TFutexWord; Value: TFutexWord; var Futex2: TFutexWord; WakeCount,RequeueCount: Integer; Private: Boolean = False): Integer;
 
 {===============================================================================
 --------------------------------------------------------------------------------
@@ -206,10 +258,10 @@ Function FutexCmpRequeue(var Futex: TFutex; Value: TFutex; var Futex2: TFutex; W
     Simple futex - declaration
 ===============================================================================}
 
-procedure SimpleFutexInit(out Futex: TFutex);
+procedure SimpleFutexInit(out Futex: TFutexWord);
 
-procedure SimpleFutexLock(var Futex: TFutex);
-procedure SimpleFutexUnlock(var Futex: TFutex);
+procedure SimpleFutexLock(var Futex: TFutexWord);
+procedure SimpleFutexUnlock(var Futex: TFutexWord);
 
 {===============================================================================
 --------------------------------------------------------------------------------
@@ -241,10 +293,10 @@ procedure SimpleFutexUnlock(var Futex: TFutex);
     Simple semaphore - declaration
 ===============================================================================}
 
-procedure SimpleSemaphoreInit(out Futex: TFutex; InitialCount: Integer);
+procedure SimpleSemaphoreInit(out Futex: TFutexWord; InitialCount: Integer);
 
-procedure SimpleSemaphoreWait(var Futex: TFutex);
-procedure SimpleSemaphorePost(var Futex: TFutex);
+procedure SimpleSemaphoreWait(var Futex: TFutexWord);
+procedure SimpleSemaphorePost(var Futex: TFutexWord);
 
 {===============================================================================
 --------------------------------------------------------------------------------
@@ -274,13 +326,13 @@ procedure SimpleSemaphorePost(var Futex: TFutex);
 type
   TSimpleSynchronizer = class(TCustomObject)
   protected
-    fLocalFutex:  TFutex;
-    fFutexPtr:    PFutex;
+    fLocalFutex:  TFutexWord;
+    fFutexPtr:    PFutexWord;
     fOwnsFutex:   Boolean;
-    procedure Initialize(var Futex: TFutex); virtual;
+    procedure Initialize(var Futex: TFutexWord); virtual;
     procedure Finalize; virtual;
   public
-    constructor Create(var Futex: TFutex); overload; virtual;
+    constructor Create(var Futex: TFutexWord); overload; virtual;
     constructor Create; overload; virtual;
     destructor Destroy; override;
   end;
@@ -296,7 +348,7 @@ type
 type
   TSimpleFutex = class(TSimpleSynchronizer)
   protected
-    procedure Initialize(var Futex: TFutex); override;
+    procedure Initialize(var Futex: TFutexWord); override;
   public
     procedure Enter; virtual;
     procedure Leave; virtual;
@@ -314,7 +366,7 @@ type
   TSimpleSemaphore = class(TSimpleSynchronizer)
   protected
     fInitialCount:  Integer;
-    procedure Initialize(var Futex: TFutex); override;
+    procedure Initialize(var Futex: TFutexWord); override;
   public
     constructor CreateAndInitCount(InitialCount: Integer); overload; virtual;
     procedure Acquire; virtual;
@@ -333,15 +385,76 @@ uses
 {$ENDIF}
 
 {===============================================================================
+    Futex system constants
+===============================================================================}
+const
+  FUTEX_WAIT            = 0;
+  FUTEX_WAKE            = 1;
+  FUTEX_FD              = 2;  // removed in Linux 2.6.26
+  FUTEX_REQUEUE         = 3;
+  FUTEX_CMP_REQUEUE     = 4;
+//FUTEX_WAKE_OP         = 5;
+//FUTEX_LOCK_PI         = 6;
+//FUTEX_UNLOCK_PI       = 7;
+//FUTEX_TRYLOCK_PI      = 8;
+//FUTEX_WAIT_BITSET     = 9;
+//FUTEX_WAKE_BITSET     = 10;
+//FUTEX_WAIT_REQUEUE_PI = 11;
+//FUTEX_CMP_REQUEUE_PI  = 12;
+//FUTEX_LOCK_PI2	      = 13; // since Linux 5.14
+
+  FUTEX_PRIVATE_FLAG   = 128;
+  FUTEX_CLOCK_REALTIME = 256;
+
+//FUTEX_CMD_MASK = not cInt(FUTEX_PRIVATE_FLAG or FUTEX_CLOCK_REALTIME);
+
+//FUTEX_BITSET_MATCH_ANY = $FFFFFFFF;
+
+{===============================================================================
 --------------------------------------------------------------------------------
                                  Futex wrappers
 --------------------------------------------------------------------------------
 ===============================================================================}
 {===============================================================================
+    Futex wrappers - internals
+===============================================================================}
+
+Function FutexOp(Op: cInt; Private: Boolean; Realtime: Boolean = False): cInt;
+begin
+Result := Op;
+If Private then
+  Result := Result or FUTEX_PRIVATE_FLAG;
+If Realtime then
+  Result := Result or FUTEX_CLOCK_REALTIME;
+end;
+
+//------------------------------------------------------------------------------
+
+Function RectCount(Count: Integer): cInt;
+begin
+If Count < 0 then
+  Result := cInt(MAXINT)
+else
+  Result := cInt(Count);
+end;
+
+//------------------------------------------------------------------------------
+
+Function RectCountToPtr(Count: Integer): Pointer;
+begin
+{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
+If Count < 0 then
+  Result := Pointer(PtrInt(MAXINT))
+else
+  Result := Pointer(PtrInt(cInt(Count)));
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
+end;
+
+{===============================================================================
     Futex wrappers - implementation
 ===============================================================================}
 
-Function FutexWaitIntr(var Futex: TFutex; Value: TFutex; Timeout: UInt32 = INFINITE): TFutexWaitResult;
+Function FutexWait(var Futex: TFutexWord; Value: TFutexWord; Timeout: UInt32 = INFINITE; Private: Boolean = False; Realtime: Boolean = False): TFutexWaitResult;
 var
   ResVal:       cInt;
   TimeoutSpec:  TTimeSpec;
@@ -351,9 +464,9 @@ If Timeout <> INFINITE then
   begin
     TimeoutSpec.tv_sec := Timeout div 1000;
     TimeoutSpec.tv_nsec := (Timeout mod 1000) * 1000000;
-    ResVal := Linux.Futex(@Futex,FUTEX_WAIT,Value,@TimeoutSpec);
+    ResVal := Linux.Futex(@Futex,FutexOp(FUTEX_WAIT,Private,Realtime),Value,@TimeoutSpec);
   end
-else ResVal := Linux.Futex(@Futex,FUTEX_WAIT,Value,nil);
+else ResVal := Linux.Futex(@Futex,FutexOp(FUTEX_WAIT,Private,Realtime),Value,nil);
 If ResVal = -1 then
   begin
     // an error occurred
@@ -364,7 +477,8 @@ If ResVal = -1 then
       ESysEINTR:        Result := fwrInterrupted;
     else
       // some other error
-      raise ESFFutexError.CreateFmt('FutexWaitIntr: Error during waiting (%d - %s).',[ErrorNumber,StrError(ErrorNumber)]);
+      raise ESFFutexError.CreateFmt('FutexWait: Wait failed (%d - %s).',
+        [ErrorNumber,StrError(ErrorNumber)]);
     end;
   end
 else Result := fwrWoken;
@@ -373,43 +487,71 @@ end;
 //------------------------------------------------------------------------------
 
 {$IFDEF OverflowChecks}{$Q-}{$ENDIF}
-Function FutexWait(var Futex: TFutex; Value: TFutex; Timeout: UInt32 = INFINITE): TFutexWaitResult;
-var
-  TimeoutRemaining: UInt32;
-  StartTime:        Int64;
-  CurrentTime:      Int64;
+Function FutexWaitNoInt(var Futex: TFutexWord; Value: TFutexWord; Timeout: UInt32 = INFINITE; Private: Boolean = False; Realtime: Boolean = False): TFutexWaitResult;
 
-  Function GetTimeAsMilliseconds: Int64;
+  procedure GetTime(out Time: TTimeSpec);
   var
-    TimeSpec:     TTimeSpec;
+    CallRes:      cInt;
     ErrorNumber:  cInt;
   begin
-    If clock_gettime(CLOCK_MONOTONIC_RAW,@TimeSpec) <> 0 then
+    If Realtime then
+      CallRes := clock_gettime(CLOCK_REALTIME,@Time)
+    else
+      CallRes := clock_gettime(CLOCK_MONOTONIC,@Time);
+    If CallRes <> 0 then
       begin
         ErrorNumber := errno;
-        raise ESFTimeError.CreateFmt('FutexWait.GetTimeAsMilliseconds: Unable to obtain time (%d - %s).',[ErrorNumber,StrError(ErrorNumber)]);
-      end
-    else Result := (((Int64(TimeSpec.tv_sec) * 1000) + (Int64(TimeSpec.tv_nsec) div 1000000))) and (Int64(-1) shr 1);
+        raise ESFTimeError.CreateFmt('FutexWait.GetTime: Unable to obtain time (%d - %s).',
+          [ErrorNumber,StrError(ErrorNumber)]);
+      end;
   end;
 
+  Function GetElapsedMillis(From: TTimeSpec): UInt32;
+  var
+    CurrentTime:  TTimeSpec;
+    Temp:         Int64;
+  begin
+    GetTime(CurrentTime);
+    Temp := 0;
+    If CurrentTime.tv_sec >= From.tv_sec then // sanity check
+      begin
+        Temp := (((Int64(CurrentTime.tv_sec) - From.tv_sec) * 1000)  +
+                 ((Int64(CurrentTime.tv_nsec) - From.tv_nsec) div 1000000)) and
+                (Int64(-1) shr 1);
+        If Temp < INFINITE then
+          Result := UInt32(Temp)
+        else
+          Result := INFINITE;
+      end
+    else Result := 0;
+  end;
+
+var
+  StartTime:        TTimeSpec;
+  TimeoutRemaining: UInt32;
+  ElapsedMillis:    UInt32;
 begin
+GetTime(StartTime);
 TimeoutRemaining := Timeout;
-StartTime := GetTimeAsMilliseconds;
 while True do
   begin
-    Result := FutexWaitIntr(Futex,Value,TimeoutRemaining);
+    Result := FutexWait(Futex,Value,TimeoutRemaining,Private,Realtime);
     If Result = fwrInterrupted then
       begin
-        // recalculate timeout, ignore time spent in here
-        CurrentTime := GetTimeAsMilliseconds;
-        If CurrentTime >= StartTime then
+        // no need to recalculate timeout if we are waiting for infinite period
+        If Timeout <> INFINITE then
           begin
-            If Timeout <= UInt32(CurrentTime - StartTime) then
+            // recalculate timeout, ignore time spent in recalculation
+            ElapsedMillis := GetElapsedMillis(StartTime);
+            If ElapsedMillis > 0 then
               begin
-                Result := fwrTimeout;
-                Break{while};
-              end
-            else TimeoutRemaining := Timeout - UInt32(CurrentTime - StartTime)
+                If Timeout <= ElapsedMillis then
+                  begin
+                    Result := fwrTimeout;
+                    Break{while};
+                  end
+                else TimeoutRemaining := Timeout - ElapsedMillis;
+              end;
           end;
       end
     else Break{while};
@@ -419,60 +561,64 @@ end;
 
 //------------------------------------------------------------------------------
 
-Function FutexWake(var Futex: TFutex; Count: Integer): Integer;
+Function FutexWake(var Futex: TFutexWord; Count: Integer; Private: Boolean = False): Integer;
 var
   ErrorNumber:  cInt;
 begin
-If Count < 0 then
-  Count := MAXINT;
-Result := Integer(Linux.Futex(@Futex,FUTEX_WAKE,cInt(Count),nil));
+Result := Integer(Linux.Futex(@Futex,FutexOp(FUTEX_WAKE,Private),RectCount(Count),nil));
 If Result = -1 then
   begin
     ErrorNumber := errno;
-    raise ESFFutexError.CreateFmt('FutexWake: Waking failed (%d - %s).',[ErrorNumber,StrError(ErrorNumber)]);
+    raise ESFFutexError.CreateFmt('FutexWake: Waking failed (%d - %s).',
+      [ErrorNumber,StrError(ErrorNumber)]);
   end;
 end;
 
 //------------------------------------------------------------------------------
 
-Function FutexRequeue(var Futex: TFutex; var Futex2: TFutex; WakeCount,RequeueCount: Integer): Integer;
+Function FutexFD(var Futex: TFutexWord; Value: Integer; Private: Boolean = False): Integer;
 var
   ErrorNumber:  cInt;
 begin
-If WakeCount < 0 then
-  WakeCount := MAXINT;
-If RequeueCount < 0 then
-  RequeueCount := MAXINT;
-{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
-Result := Integer(Linux.Futex(@Futex,FUTEX_REQUEUE,cInt(WakeCount),Pointer(PtrInt(RequeueCount)),@Futex2,0));
-{$IFDEF FPCDWM}{$POP}{$ENDIF}
+Result := Integer(Linux.Futex(@Futex,FutexOp(FUTEX_FD,Private),cInt(Value),nil));
 If Result = -1 then
   begin
     ErrorNumber := errno;
-    raise ESFFutexError.CreateFmt('FutexRequeue: Requeue failed (%d - %s).',[ErrorNumber,StrError(ErrorNumber)]);
+    raise ESFFutexError.CreateFmt('FutexFD: File descriptor creation failed (%d - %s).',
+      [ErrorNumber,StrError(ErrorNumber)]);
   end;
 end;
 
 //------------------------------------------------------------------------------
 
-Function FutexCmpRequeue(var Futex: TFutex; Value: TFutex; var Futex2: TFutex; WakeCount,RequeueCount: Integer): Integer;
+Function FutexRequeue(var Futex: TFutexWord; var Futex2: TFutexWord; WakeCount,RequeueCount: Integer; Private: Boolean = False): Integer;
 var
   ErrorNumber:  cInt;
 begin
-If WakeCount < 0 then
-  WakeCount := MAXINT;
-If RequeueCount < 0 then
-  RequeueCount := MAXINT;
-{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
-Result := Integer(Linux.Futex(@Futex,FUTEX_CMP_REQUEUE,cInt(WakeCount),Pointer(PtrInt(RequeueCount)),@Futex2,Value));
-{$IFDEF FPCDWM}{$POP}{$ENDIF}
+Result := Integer(Linux.Futex(@Futex,FutexOp(FUTEX_REQUEUE,Private),RectCount(WakeCount),RectCountToPtr(RequeueCount),@Futex2,0));
+If Result = -1 then
+  begin
+    ErrorNumber := errno;
+    raise ESFFutexError.CreateFmt('FutexRequeue: Requeue failed (%d - %s).',
+      [ErrorNumber,StrError(ErrorNumber)]);
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+Function FutexCmpRequeue(var Futex: TFutexWord; Value: TFutexWord; var Futex2: TFutexWord; WakeCount,RequeueCount: Integer; Private: Boolean = False): Integer;
+var
+  ErrorNumber:  cInt;
+begin
+Result := Integer(Linux.Futex(@Futex,FutexOp(FUTEX_CMP_REQUEUE,Private),RectCount(WakeCount),RectCountToPtr(RequeueCount),@Futex2,Value));
 If Result = -1 then
   begin
     ErrorNumber := errno;
     If ErrorNumber = ESysEAGAIN then
       Result := -1
     else
-      raise ESFFutexError.CreateFmt('FutexCmpRequeue: Requeue failed (%d - %s).',[ErrorNumber,StrError(ErrorNumber)]);
+      raise ESFFutexError.CreateFmt('FutexCmpRequeue: Requeue failed (%d - %s).',
+        [ErrorNumber,StrError(ErrorNumber)]);
   end;
 end;
 
@@ -493,16 +639,16 @@ const
     Simple futex - implementation
 ===============================================================================}
 
-procedure SimpleFutexInit(out Futex: TFutex);
+procedure SimpleFutexInit(out Futex: TFutexWord);
 begin
 Futex := SF_STATE_UNLOCKED;
 end;
 
 //------------------------------------------------------------------------------
 
-procedure SimpleFutexLock(var Futex: TFutex);
+procedure SimpleFutexLock(var Futex: TFutexWord);
 var
-  OrigState:  TFutex;
+  OrigState:  TFutexWord;
 begin
 {
   Check if futex is unlocked.
@@ -544,7 +690,7 @@ end;
 
 //------------------------------------------------------------------------------
 
-procedure SimpleFutexUnlock(var Futex: TFutex);
+procedure SimpleFutexUnlock(var Futex: TFutexWord);
 begin
 {
   Decrement the futex and check its current state.
@@ -563,13 +709,6 @@ If InterlockedDecrement(Futex) <> SF_STATE_UNLOCKED then
 FutexWake(Futex,1);
 end;
 
-//------------------------------------------------------------------------------
-
-procedure SimpleFutexQueue(var Futex: TFutex);
-begin
-InterlockedStore(Futex,SF_STATE_WAITERS);
-end;
-
 {===============================================================================
 --------------------------------------------------------------------------------
                                 Simple semaphore
@@ -579,7 +718,7 @@ end;
     Simple semaphore - implementation
 ===============================================================================}
 
-procedure SimpleSemaphoreInit(out Futex: TFutex; InitialCount: Integer);
+procedure SimpleSemaphoreInit(out Futex: TFutexWord; InitialCount: Integer);
 begin
 If InitialCount >= 0 then
   Futex := InitialCount
@@ -589,9 +728,9 @@ end;
 
 //------------------------------------------------------------------------------
 
-procedure SimpleSemaphoreWait(var Futex: TFutex);
+procedure SimpleSemaphoreWait(var Futex: TFutexWord);
 var
-  OldCount: TFutex;
+  OldCount: TFutexWord;
 begin
 repeat
 {
@@ -609,7 +748,7 @@ end;
 
 //------------------------------------------------------------------------------
 
-procedure SimpleSemaphorePost(var Futex: TFutex);
+procedure SimpleSemaphorePost(var Futex: TFutexWord);
 begin
 {
   Always call FutexWake, since the increment will always increase the counter
@@ -631,7 +770,7 @@ end;
     TSimpleSynchronizer - protected methods
 -------------------------------------------------------------------------------}
 
-procedure TSimpleSynchronizer.Initialize(var Futex: TFutex);
+procedure TSimpleSynchronizer.Initialize(var Futex: TFutexWord);
 begin
 fLocalFutex := 0;
 fFutexPtr := @Futex;
@@ -649,7 +788,7 @@ end;
     TSimpleSynchronizer - public methods
 -------------------------------------------------------------------------------}
 
-constructor TSimpleSynchronizer.Create(var Futex: TFutex);
+constructor TSimpleSynchronizer.Create(var Futex: TFutexWord);
 begin
 inherited Create;
 Initialize(Futex);
@@ -683,7 +822,7 @@ end;
     TSimpleFutex - protected methods
 -------------------------------------------------------------------------------}
 
-procedure TSimpleFutex.Initialize(var Futex: TFutex);
+procedure TSimpleFutex.Initialize(var Futex: TFutexWord);
 begin
 inherited;
 If fOwnsFutex then
@@ -718,7 +857,7 @@ end;
     TSimpleSemaphore - protected methods
 -------------------------------------------------------------------------------}
 
-procedure TSimpleSemaphore.Initialize(var Futex: TFutex);
+procedure TSimpleSemaphore.Initialize(var Futex: TFutexWord);
 begin
 inherited;
 If fOwnsFutex then
