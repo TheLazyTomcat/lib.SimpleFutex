@@ -18,7 +18,7 @@
 
   Version 1.1 (2022-06-06)
 
-  Last change 2022-06-06
+  Last change 2022-06-14
 
   ©2021-2022 František Milt
 
@@ -507,12 +507,10 @@ const
   FUTEX_WAKE_BITSET     = 10;
   FUTEX_WAIT_REQUEUE_PI = 11;
   FUTEX_CMP_REQUEUE_PI  = 12;
-  FUTEX_LOCK_PI2	      = 13; // since Linux 5.14
+  FUTEX_LOCK_PI2        = 13; // since Linux 5.14
 
   FUTEX_PRIVATE_FLAG   = 128;
   FUTEX_CLOCK_REALTIME = 256;
-
-//FUTEX_CMD_MASK = not cInt(FUTEX_PRIVATE_FLAG or FUTEX_CLOCK_REALTIME);
 
   FUTEX_OP_SET  = 0;  // uaddr2 = oparg
   FUTEX_OP_ADD  = 1;  // uaddr2 += oparg
