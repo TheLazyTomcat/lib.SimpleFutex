@@ -18,7 +18,7 @@
 
   Version 1.1 (2022-06-06)
 
-  Last change 2022-06-14
+  Last change 2022-10-03
 
   ©2021-2022 František Milt
 
@@ -627,7 +627,7 @@ begin
 GetTime(CurrentTime,Realtime);
 If CurrentTime.tv_sec >= From.tv_sec then // sanity check
   begin
-    Temp := (((Int64(CurrentTime.tv_sec) - From.tv_sec) * MSECS_PER_SEC)  +
+    Temp := (((Int64(CurrentTime.tv_sec) - From.tv_sec) * MSECS_PER_SEC) +
              ((Int64(CurrentTime.tv_nsec) - From.tv_nsec) div NSECS_PER_MSEC)) and
             (Int64(-1) shr 1);
     If Temp < INFINITE then
@@ -635,7 +635,7 @@ If CurrentTime.tv_sec >= From.tv_sec then // sanity check
     else
       Result := INFINITE;
   end
-else Result := 0;
+else Result := INFINITE;  // time overflowed
 end;
 {$IFDEF OverflowChecks}{$Q+}{$ENDIF}
 
@@ -692,15 +692,12 @@ while True do
           begin
             // recalculate timeout, ignore time spent in recalculation
             ElapsedMillis := GetElapsedMillis(StartTime,Realtime);
-            If ElapsedMillis > 0 then
+            If Timeout <= ElapsedMillis then
               begin
-                If Timeout <= ElapsedMillis then
-                  begin
-                    Result := fwrTimeout;
-                    Break{while};
-                  end
-                else TimeoutRemaining := Timeout - ElapsedMillis;
-              end;
+                Result := fwrTimeout;
+                Break{while};
+              end
+            else TimeoutRemaining := Timeout - ElapsedMillis;
           end;
       end
     else Break{while};
@@ -870,15 +867,12 @@ while True do
         If Timeout <> INFINITE then
           begin
             ElapsedMillis := GetElapsedMillis(StartTime,Realtime);
-            If ElapsedMillis > 0 then
+            If Timeout <= ElapsedMillis then
               begin
-                If Timeout <= ElapsedMillis then
-                  begin
-                    Result := fwrTimeout;
-                    Break{while};
-                  end
-                else TimeoutRemaining := Timeout - ElapsedMillis;
-              end;
+                Result := fwrTimeout;
+                Break{while};
+              end
+            else TimeoutRemaining := Timeout - ElapsedMillis;
           end;
       end
     else Break{while};
