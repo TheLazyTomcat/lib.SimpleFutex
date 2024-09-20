@@ -26,7 +26,7 @@
 
   Version 1.2 (2024-08-23)
 
-  Last change 2024-09-09
+  Last change 2024-09-21
 
   ©2021-2024 František Milt
 
@@ -435,7 +435,7 @@ Function FutexWaitRequeuePI(var Futex: TFutexWord; Value: TFutexWord; var Futex2
               unlocked by any thread - SM is not a classical mutex with thread
               ownership).
 
-    NOTE - Simple mutex does not neeed to be explicitly initialized if it is
+    NOTE - Simple mutex does not need to be explicitly initialized if it is
            set to all zero by other means (eg. memory initialization).
 }
 {===============================================================================
@@ -656,9 +656,10 @@ type
   TThreadCheckMethod = (tcmDefault,tcmSignal,tcmProc);
 
 {
-  TSimpleRobustMutexData
+  TSimpleRobustMutexInfo
 
-  This structure is used to pass data in and out of SimpleRobustMutexLock call.
+  This structure is used to pass settings and other information in and out of
+  SimpleRobustMutexLock call.
 
   WARNING - this structure can be changed in the future, and therefore using
             it and its overload of SimpleRobustMutexLock is not recommended.
@@ -702,7 +703,7 @@ type
   If some details in field descriptions are not clear, then refer higher to
   description of SRM itself, part where robustness is talked about.
 }
-  TSimpleRobustMutexData = record
+  TSimpleRobustMutexInfo = record
     CheckInterval:      UInt32;
     CheckMethod:        TThreadCheckMethod;
     CheckCount:         Integer;
@@ -716,11 +717,11 @@ type
 procedure SimpleRobustMutexInit(out RobustMutex: TSimpleRobustMutexState);
 
 {
-  The first overload of SimpleRobustMutexLock (the one with Data parameter)
+  The first overload of SimpleRobustMutexLock (the one with Info parameter)
   is intended for debugging. You can use it if you wish, but it is generally
-  not recommended as the type TSimpleRobustMutexData can change in the future.
+  not recommended as the type TSimpleRobustMutexInfo can change in the future.
 }
-procedure SimpleRobustMutexLock(var RobustMutex: TSimpleRobustMutexState; var Data: TSimpleRobustMutexData); overload;
+procedure SimpleRobustMutexLock(var RobustMutex: TSimpleRobustMutexState; var Info: TSimpleRobustMutexInfo); overload;
 procedure SimpleRobustMutexLock(var RobustMutex: TSimpleRobustMutexState; CheckInterval: UInt32 = 100; CheckMethod: TThreadCheckMethod = tcmDefault); overload;
 procedure SimpleRobustMutexLock(var RobustMutex: TSimpleRobustMutexState; CheckMethod: TThreadCheckMethod); overload;
 
@@ -1576,13 +1577,8 @@ end;
     Simple robust mutex - internals
 ===============================================================================}
 {$IFDEF SF_SRM_TimeCheck}
-threadvar
-  TVAR_ThreadCreationTime:      UInt32;
-  TVAR_HaveThreadCreationTime:  Boolean;
 
-//------------------------------------------------------------------------------
-
-Function GetThreadCreationTime(ThreadID: pid_t): UInt32;
+Function SRM_GetThreadCreationTime(ThreadID: pid_t): UInt32;
 const
   READ_SIZE = 1024;
 var
@@ -1651,7 +1647,7 @@ end;
 
 {$ELSE}//-----------------------------------------------------------------------
 
-Function TrySignalThread(ThreadID: pid_t): Boolean;
+Function SRM_TrySignalThread(ThreadID: pid_t): Boolean;
 var
   ErrorNumber:  cint;
 begin
@@ -1667,40 +1663,95 @@ end;
 {$ENDIF}
 //------------------------------------------------------------------------------
 
-Function LockingThreadLives(MutexValue: TSimpleRobustMutexState; var Data: TSimpleRobustMutexData): Boolean;
+Function SRM_LockingThreadLives(MutexValue: TSimpleRobustMutexState; var Info: TSimpleRobustMutexInfo): Boolean;
 begin
-Inc(Data.CheckCount);
+Inc(Info.CheckCount);
 {$IFDEF SF_SRM_TimeCheck}
 try
   If FileExists(Format('/proc/%d/stat',[MutexValue.ThreadID])) then
     begin
-      Result := GetThreadCreationTime(MutexValue.ThreadID) = MutexValue.ThreadCTime;
-      Data.ConsecFailCount := 0;
+      Result := SRM_GetThreadCreationTime(MutexValue.ThreadID) = MutexValue.ThreadCTime;
+      Info.ConsecFailCount := 0;
     end
   else Result := False;
 except
   If FileExists(Format('/proc/%d/stat',[MutexValue.ThreadID])) then
     begin
-      If Data.ConsecFailCount < Data.MaxConsecFailCount then
+      If Info.ConsecFailCount < Info.MaxConsecFailCount then
         begin
-          Inc(Data.ConsecFailCount);
-          Inc(Data.FailCount);
+          Inc(Info.ConsecFailCount);
+          Inc(Info.FailCount);
         end
       else raise; // re-raise the exception
     end
   else Result := False;
 end;
 {$ELSE}
-case Data.CheckMethod of
+case Info.CheckMethod of
   tcmProc:  Result := DirectoryExists(Format('/proc/%d/task/%d',[MutexValue.ProcessID,MutexValue.ThreadID]));
 else
  {tcmDefault,tcmSignal}
-  If TrySignalThread(MutexValue.ProcessID) and TrySignalThread(MutexValue.ThreadID) then
+  If SRM_TrySignalThread(MutexValue.ProcessID) and SRM_TrySignalThread(MutexValue.ThreadID) then
     Result := getpgid(MutexValue.ThreadID) = MutexValue.ProcessID
   else
     Result := False;
 end;
 {$ENDIF}
+end;
+
+//==============================================================================
+{$IFDEF SF_SRM_TimeCheck}
+threadvar
+  TVAR_ThreadCreationTime:      UInt32;
+  TVAR_HaveThreadCreationTime:  Boolean;
+{$ENDIF}
+
+//------------------------------------------------------------------------------
+
+procedure SRM_PrepareInfo(var Info: TSimpleRobustMutexInfo);
+begin
+{$IFDEF SF_SRM_TimeCheck}
+Info.CheckMethod := tcmDefault;
+{$ENDIF}
+Info.CheckCount := 0;
+Info.FailCount := 0;
+Info.ConsecFailCount := 0;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure SRM_PrepareThreadState(out State: TSimpleRobustMutexState);
+{$IFDEF SF_SRM_TimeCheck}
+var
+  FailCounter:  Integer;
+{$ENDIF}
+begin
+State.ThreadID := gettid;
+{$IFDEF SF_SRM_TimeCheck}
+If not TVAR_HaveThreadCreationTime then
+  begin
+    // make sure we get the time
+    FailCounter := 100;
+    while True do
+      try
+        TVAR_ThreadCreationTime := GetThreadCreationTime(State.ThreadID);
+        Break{while}
+      except
+        If FailCounter > 0 then
+          begin
+            Dec(FailCounter); // eat the errors
+            Sleep(10);
+          end
+        else raise;
+      end;
+    TVAR_HaveThreadCreationTime := True;
+  end;
+State.ThreadCTime := TVAR_ThreadCreationTime;
+{$ELSE}
+State.ProcessID := getpid;
+{$ENDIF}
+If State.FullWidth = 0 then
+  raise ESFInvalidValue.Create('SRM_PrepareThreadState: Invalid stread state.');
 end;
 
 {===============================================================================
@@ -1715,53 +1766,22 @@ end;
 
 //------------------------------------------------------------------------------
 
-procedure SimpleRobustMutexLock(var RobustMutex: TSimpleRobustMutexState; var Data: TSimpleRobustMutexData);
+procedure SimpleRobustMutexLock(var RobustMutex: TSimpleRobustMutexState; var Info: TSimpleRobustMutexInfo);
 var
-  NewValue:     TSimpleRobustMutexState;
-  OldValue:     TSimpleRobustMutexState;
-{$IFDEF SF_SRM_TimeCheck}
-  FailCounter:  Integer;
-{$ENDIF}
+  NewValue: TSimpleRobustMutexState;
+  OldValue: TSimpleRobustMutexState;
 begin
 // prepare variables
-{$IFDEF SF_SRM_TimeCheck}
-Data.CheckMethod := tcmDefault;
-{$ENDIF}
-Data.CheckCount := 0;
-Data.FailCount := 0;
-Data.ConsecFailCount := 0;
-NewValue.ThreadID := gettid;
-{$IFDEF SF_SRM_TimeCheck}
-If not TVAR_HaveThreadCreationTime then
-  begin
-    // make sure we get the time
-    FailCounter := 100;
-    while True do
-      try
-        TVAR_ThreadCreationTime := GetThreadCreationTime(NewValue.ThreadID);
-        Break{while}
-      except
-        If FailCounter > 0 then
-          begin
-            Dec(FailCounter); // eat the errors
-            Sleep(10);
-          end
-        else raise;
-      end;
-    TVAR_HaveThreadCreationTime := True;
-  end;
-NewValue.ThreadCTime := TVAR_ThreadCreationTime;
-{$ELSE}
-NewValue.ProcessID := getpid;
-{$ENDIF}
+SRM_PrepareInfo(Info);
+SRM_PrepareThreadState(NewValue);
 // and now the locking...
 OldValue.FullWidth := InterlockedCompareExchange(RobustMutex.FullWidth,NewValue.FullWidth,SF_SRM_UNLOCKED);
 while OldValue.FullWidth <> SF_SRM_UNLOCKED do
   begin
-    If not LockingThreadLives(OldValue,Data) then
+    If not SRM_LockingThreadLives(OldValue,Info) then
       If InterlockedCompareExchange(RobustMutex.FullWidth,NewValue.FullWidth,OldValue.FullWidth) = OldValue.FullWidth then
         Break{while};
-    FutexWait(RobustMutex.FutexWord,OldValue.FutexWord,Data.CheckInterval);
+    FutexWait(RobustMutex.FutexWord,OldValue.FutexWord,Info.CheckInterval);
     OldValue.FullWidth := InterlockedCompareExchange(RobustMutex.FullWidth,NewValue.FullWidth,SF_SRM_UNLOCKED);
   end;
 end;
@@ -1770,17 +1790,17 @@ end;
 
 procedure SimpleRobustMutexLock(var RobustMutex: TSimpleRobustMutexState; CheckInterval: UInt32 = 100; CheckMethod: TThreadCheckMethod = tcmDefault);
 var
-  TempData:  TSimpleRobustMutexData;
+  TempInfo:  TSimpleRobustMutexInfo;
 begin
-TempData.CheckInterval := CheckInterval;
-TempData.CheckMethod := CheckMethod;
+TempInfo.CheckInterval := CheckInterval;
+TempInfo.CheckMethod := CheckMethod;
 If CheckInterval <> 0 then
   // give it at least one second of time...
-  TempData.MaxConsecFailCount := Ceil(1000 / CheckInterval)
+  TempInfo.MaxConsecFailCount := Ceil(1000 / CheckInterval)
 else
   // someone wants to play dirty...
-  TempData.MaxConsecFailCount := 10;
-SimpleRobustMutexLock(RobustMutex,TempData);
+  TempInfo.MaxConsecFailCount := 10;
+SimpleRobustMutexLock(RobustMutex,TempInfo);
 end;
 
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
